@@ -144,6 +144,14 @@ class VLLMGeneration:
         group_port (`int`, *optional*, defaults to `51216`):
             Port number for the weight update group. This is used to communicate with the vLLM server. Unless the port
             is occupied, there is no need to change it.
+        server_async_dispatch (`bool`, *optional*, defaults to `False`):
+            Whether to split prompts into smaller chunks and dispatch them concurrently when using server mode. This
+            keeps the trainer API synchronous but can reduce head-of-line blocking from long-tail prompts.
+        server_async_dispatch_chunk_size (`int`, *optional*, defaults to `1`):
+            Number of prompts to include in each concurrent server request when `server_async_dispatch=True`.
+        server_async_dispatch_max_workers (`int`, *optional*):
+            Maximum number of concurrent request workers used when `server_async_dispatch=True`. If `None`, a bounded
+            default is chosen automatically.
 
         > Parameters for "colocate" vLLM mode:
 
@@ -228,6 +236,9 @@ class VLLMGeneration:
         server_port: int = 8000,
         server_timeout: float = 240.0,
         group_port: int = 51216,
+        server_async_dispatch: bool = False,
+        server_async_dispatch_chunk_size: int = 1,
+        server_async_dispatch_max_workers: int | None = None,
         # Colocate mode configuration
         tensor_parallel_size: int = 1,
         gpu_memory_utilization: float = 0.9,
@@ -260,6 +271,9 @@ class VLLMGeneration:
         self.server_port = server_port
         self.group_port = group_port
         self.server_timeout = server_timeout
+        self.server_async_dispatch = server_async_dispatch
+        self.server_async_dispatch_chunk_size = server_async_dispatch_chunk_size
+        self.server_async_dispatch_max_workers = server_async_dispatch_max_workers
 
         # Colocate mode configuration
         self.tensor_parallel_size = tensor_parallel_size
@@ -594,11 +608,20 @@ class VLLMGeneration:
                     "generation_kwargs": self.generation_kwargs,
                 }
                 with profiler:
-                    output = self.vllm_client.generate(
-                        prompts=ordered_set_of_prompt_ids,
-                        images=ordered_set_of_images,
-                        **sampling_params,
-                    )
+                    if self.server_async_dispatch:
+                        output = self.vllm_client.generate_concurrent(
+                            prompts=ordered_set_of_prompt_ids,
+                            images=ordered_set_of_images,
+                            chunk_size=self.server_async_dispatch_chunk_size,
+                            max_workers=self.server_async_dispatch_max_workers,
+                            **sampling_params,
+                        )
+                    else:
+                        output = self.vllm_client.generate(
+                            prompts=ordered_set_of_prompt_ids,
+                            images=ordered_set_of_images,
+                            **sampling_params,
+                        )
                     payload = (
                         output["prompt_ids"],
                         output["completion_ids"],

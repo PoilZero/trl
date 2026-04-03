@@ -18,6 +18,7 @@ import copy
 import logging
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from urllib.parse import urlparse
 
@@ -262,6 +263,128 @@ class VLLMClient:
                 - `logprob_token_ids` (`list[list[list[int]]]`):
                     Token IDs corresponding to each logprob, same shape as `logprobs`.
         """
+        payload = self._build_generate_payload(
+            prompts=prompts,
+            images=images,
+            n=n,
+            repetition_penalty=repetition_penalty,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            max_tokens=max_tokens,
+            logprobs=logprobs,
+            structured_outputs_regex=structured_outputs_regex,
+            generation_kwargs=generation_kwargs,
+        )
+        return self._post_generate_payload(payload)
+
+    def generate_concurrent(
+        self,
+        prompts: list[str] | list[list[int]],
+        images: list | None = None,
+        n: int = 1,
+        repetition_penalty: float = 1.0,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        top_k: int = 0,
+        min_p: float = 0.0,
+        max_tokens: int = 16,
+        logprobs: int | None = 0,
+        structured_outputs_regex: str | None = None,
+        generation_kwargs: dict | None = None,
+        chunk_size: int = 1,
+        max_workers: int | None = None,
+    ) -> dict[str, list[list[int]]]:
+        """Generate completions by splitting prompts into smaller chunks and dispatching them concurrently.
+
+        This is useful in server mode to reduce head-of-line blocking from long-tail samples while preserving the
+        trainer's synchronous external API.
+        """
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be > 0, got {chunk_size}")
+
+        if not prompts:
+            return {"prompt_ids": [], "completion_ids": [], "logprobs": [], "logprob_token_ids": []}
+
+        images = images or [None] * len(prompts)
+        if len(images) != len(prompts):
+            raise ValueError(f"images must have the same length as prompts, got {len(images)} != {len(prompts)}")
+
+        chunks = [
+            (
+                idx,
+                prompts[idx : idx + chunk_size],
+                images[idx : idx + chunk_size],
+            )
+            for idx in range(0, len(prompts), chunk_size)
+        ]
+
+        payloads = [
+            (
+                idx,
+                self._build_generate_payload(
+                    prompts=prompt_chunk,
+                    images=image_chunk,
+                    n=n,
+                    repetition_penalty=repetition_penalty,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    min_p=min_p,
+                    max_tokens=max_tokens,
+                    logprobs=logprobs,
+                    structured_outputs_regex=structured_outputs_regex,
+                    generation_kwargs=generation_kwargs,
+                ),
+            )
+            for idx, prompt_chunk, image_chunk in chunks
+        ]
+
+        max_workers = max_workers or min(32, len(payloads))
+        ordered_results = [None] * len(payloads)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_pos = {
+                executor.submit(self._post_generate_payload, payload): pos for pos, (_, payload) in enumerate(payloads)
+            }
+            for future in as_completed(future_to_pos):
+                pos = future_to_pos[future]
+                ordered_results[pos] = future.result()
+
+        prompt_ids, completion_ids = [], []
+        logprobs_out, logprob_token_ids_out = [], []
+        has_logprobs = True
+        for result in ordered_results:
+            prompt_ids.extend(result["prompt_ids"])
+            completion_ids.extend(result["completion_ids"])
+            if result["logprobs"] is None or result["logprob_token_ids"] is None:
+                has_logprobs = False
+            else:
+                logprobs_out.extend(result["logprobs"])
+                logprob_token_ids_out.extend(result["logprob_token_ids"])
+
+        return {
+            "prompt_ids": prompt_ids,
+            "completion_ids": completion_ids,
+            "logprobs": logprobs_out if has_logprobs else None,
+            "logprob_token_ids": logprob_token_ids_out if has_logprobs else None,
+        }
+
+    def _build_generate_payload(
+        self,
+        prompts: list[str] | list[list[int]],
+        images: list | None = None,
+        n: int = 1,
+        repetition_penalty: float = 1.0,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        top_k: int = 0,
+        min_p: float = 0.0,
+        max_tokens: int = 16,
+        logprobs: int | None = 0,
+        structured_outputs_regex: str | None = None,
+        generation_kwargs: dict | None = None,
+    ) -> dict:
         url = f"{self.base_url}/generate/"
 
         # Convert PIL images to base64 strings. Each element is a list of images for the corresponding prompt,
@@ -270,10 +393,9 @@ class VLLMClient:
             images = [
                 [pil_to_base64(img) for img in img_list] if img_list is not None else None for img_list in images
             ]
-
-        response = self.session.post(
-            url,
-            json={
+        return {
+            "url": url,
+            "json": {
                 "prompts": prompts,
                 "images": images,
                 "n": n,
@@ -287,7 +409,10 @@ class VLLMClient:
                 "structured_outputs_regex": structured_outputs_regex,
                 "generation_kwargs": generation_kwargs or {},
             },
-        )
+        }
+
+    def _post_generate_payload(self, payload: dict) -> dict[str, list[list[int]]]:
+        response = self.session.post(payload["url"], json=payload["json"])
         if response.status_code == 200:
             json_response = response.json()
             return {

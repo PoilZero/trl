@@ -258,6 +258,12 @@ In this mode, vLLM runs in a separate process (and using separate GPUs) and comm
 > [!TIP]
 > By default, GRPO uses `MASTER_ADDR=localhost` and `MASTER_PORT=12345` for vLLM, but you can override these values by setting the environment variables accordingly.
 
+> [!TIP]
+> When using `vllm_mode="server"`, you can enable `vllm_server_async_dispatch=True` to split prompts into smaller
+> chunks and dispatch them concurrently to the vLLM server. This keeps the trainer loop synchronous while making the
+> rollout backend less sensitive to long-tail prompts. This is not fully asynchronous training: the trainer still
+> waits for the current generation batch before continuing to optimization.
+
 For more information, see [Speeding up training with vLLM](speeding_up_training#vllm-for-fast-generation-in-online-methods).
 
 

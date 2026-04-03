@@ -14,6 +14,7 @@
 
 import os
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -22,7 +23,8 @@ from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
 from transformers.testing_utils import torch_device
 
 from trl.generation.vllm_client import VLLMClient
-from trl.generation.vllm_generation import extract_logprobs
+from trl.generation import vllm_generation as vllm_generation_module
+from trl.generation.vllm_generation import VLLMGeneration, extract_logprobs
 from trl.import_utils import is_vllm_available
 from trl.scripts.vllm_serve import chunk_list
 
@@ -122,6 +124,100 @@ class TestExtractLogprobs(TrlTestCase):
 
         assert all_logprobs is None
         assert all_token_ids is None
+
+
+class TestVLLMClientConcurrentUnit(TrlTestCase):
+    def test_generate_concurrent_preserves_order(self):
+        client = object.__new__(VLLMClient)
+
+        def fake_build_generate_payload(**kwargs):
+            return {"url": "http://fake/generate/", "json": {"prompts": kwargs["prompts"]}}
+
+        def fake_post_generate_payload(payload):
+            prompt = payload["json"]["prompts"][0]
+            if prompt == "slow":
+                time.sleep(0.05)
+            elif prompt == "mid":
+                time.sleep(0.02)
+            return {
+                "prompt_ids": [[prompt]],
+                "completion_ids": [[f"{prompt}-completion"]],
+                "logprobs": [[[0.0]]],
+                "logprob_token_ids": [[[0]]],
+            }
+
+        client._build_generate_payload = fake_build_generate_payload
+        client._post_generate_payload = fake_post_generate_payload
+
+        outputs = client.generate_concurrent(
+            prompts=["slow", "fast", "mid"],
+            chunk_size=1,
+            max_workers=3,
+        )
+
+        assert outputs["prompt_ids"] == [["slow"], ["fast"], ["mid"]]
+        assert outputs["completion_ids"] == [["slow-completion"], ["fast-completion"], ["mid-completion"]]
+
+
+class TestVLLMGenerationServerDispatch(TrlTestCase):
+    def test_generate_uses_concurrent_server_dispatch_when_enabled(self, monkeypatch):
+        monkeypatch.setattr(vllm_generation_module, "gather_object", lambda x: x)
+        monkeypatch.setattr(vllm_generation_module, "broadcast_object_list", lambda obj_list, from_process=0: None)
+
+        generation = object.__new__(VLLMGeneration)
+        generation.mode = "server"
+        generation.accelerator = SimpleNamespace(is_main_process=True, process_index=0, num_processes=1)
+        generation.temperature = 1.0
+        generation.top_p = 1.0
+        generation.top_k = 0
+        generation.min_p = None
+        generation.repetition_penalty = 1.0
+        generation.max_completion_length = 8
+        generation.logprobs = 0
+        generation.generation_kwargs = {}
+        generation.structured_outputs_regex = None
+        generation.server_async_dispatch = True
+        generation.server_async_dispatch_chunk_size = 1
+        generation.server_async_dispatch_max_workers = 2
+        generation.enable_sleep_mode = False
+
+        class FakeClient:
+            def __init__(self):
+                self.generate_calls = 0
+                self.generate_concurrent_calls = 0
+
+            def generate(self, *args, **kwargs):
+                self.generate_calls += 1
+                return {
+                    "prompt_ids": [[1], [2]],
+                    "completion_ids": [[11], [22]],
+                    "logprobs": [[[0.0]], [[0.0]]],
+                    "logprob_token_ids": [[[11]], [[22]]],
+                }
+
+            def generate_concurrent(self, *args, **kwargs):
+                self.generate_concurrent_calls += 1
+                return {
+                    "prompt_ids": [[1], [2]],
+                    "completion_ids": [[11], [22]],
+                    "logprobs": [[[0.0]], [[0.0]]],
+                    "logprob_token_ids": [[[11]], [[22]]],
+                }
+
+        generation.vllm_client = FakeClient()
+
+        prompt_ids, completion_ids, logprobs, logprob_token_ids = generation.generate(
+            prompts=[[1], [2]],
+            images=None,
+            num_generations=1,
+        )
+
+        assert generation.vllm_client.generate_calls == 0
+        assert generation.vllm_client.generate_concurrent_calls == 1
+        assert prompt_ids == [[1], [2]]
+        assert completion_ids == [[11], [22]]
+        assert logprobs == [[[0.0]], [[0.0]]]
+        assert logprob_token_ids == [[[11]], [[22]]]
 
 
 @pytest.mark.slow

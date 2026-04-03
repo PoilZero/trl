@@ -745,6 +745,9 @@ class GRPOTrainer(_BaseTrainer):
                 server_port=args.vllm_server_port,
                 group_port=args.vllm_group_port,
                 server_timeout=args.vllm_server_timeout,
+                server_async_dispatch=args.vllm_server_async_dispatch,
+                server_async_dispatch_chunk_size=args.vllm_server_async_dispatch_chunk_size,
+                server_async_dispatch_max_workers=args.vllm_server_async_dispatch_max_workers,
                 # Colocate mode configuration
                 tensor_parallel_size=args.vllm_tensor_parallel_size,
                 gpu_memory_utilization=args.vllm_gpu_memory_utilization,

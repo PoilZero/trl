@@ -143,6 +143,15 @@ class GRPOConfig(_BaseConfig):
         vllm_group_port (`int`, *optional*, defaults to `51216`):
             Port number for the weight update group. This is used to communicate with the vLLM server. Unless the port
             is occupied, there is no need to change it.
+        vllm_server_async_dispatch (`bool`, *optional*, defaults to `False`):
+            Whether to split prompts into smaller chunks and dispatch them concurrently when `vllm_mode="server"`.
+            This keeps the trainer loop synchronous while allowing the rollout backend to reduce head-of-line blocking
+            from long-tail prompts.
+        vllm_server_async_dispatch_chunk_size (`int`, *optional*, defaults to `1`):
+            Number of prompts per concurrent request when `vllm_server_async_dispatch=True`.
+        vllm_server_async_dispatch_max_workers (`int`, *optional*):
+            Maximum number of concurrent request workers when `vllm_server_async_dispatch=True`. If `None`, a bounded
+            default is chosen automatically.
 
         > Parameters that control colocated vLLM execution (only used when `vllm_mode` is `"colocate"`)
 
@@ -557,6 +566,24 @@ class GRPOConfig(_BaseConfig):
         metadata={
             "help": "Port number for the weight update group. This is used to communicate with the vLLM server. "
             "Unless the port is occupied, there is no need to change it.",
+        },
+    )
+    vllm_server_async_dispatch: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to split prompts into smaller chunks and dispatch them concurrently when "
+            "`vllm_mode='server'`."
+        },
+    )
+    vllm_server_async_dispatch_chunk_size: int = field(
+        default=1,
+        metadata={"help": "Number of prompts per concurrent request when async server dispatch is enabled."},
+    )
+    vllm_server_async_dispatch_max_workers: int | None = field(
+        default=None,
+        metadata={
+            "help": "Maximum number of concurrent request workers when async server dispatch is enabled. If None, a "
+            "bounded default is chosen automatically."
         },
     )
 
