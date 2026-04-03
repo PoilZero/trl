@@ -144,11 +144,13 @@ class AsyncRolloutWorker:
 
         base_tools = tools or []
         self._sync_tool_dicts = [{} for _ in range(self.max_inflight_tasks)]
+        self._async_tool_dicts = [{} for _ in range(self.max_inflight_tasks)]
         for i in range(self.max_inflight_tasks):
             for tool in base_tools + (environment_methods[i] if self.environments is not None else []):
                 if inspect.iscoroutinefunction(tool):
-                    raise ValueError("Asynchronous tools are not supported in AsyncRolloutWorker yet.")
-                self._sync_tool_dicts[i][tool.__name__] = tool
+                    self._async_tool_dicts[i][tool.__name__] = tool
+                else:
+                    self._sync_tool_dicts[i][tool.__name__] = tool
         self.tools = base_tools + (environment_methods[0] if self.environments is not None else [])
 
         self.vllm_server_url = vllm_server_url.rstrip("/")
@@ -358,7 +360,11 @@ class AsyncRolloutWorker:
 
                     logger.info(f"[slot] assigned slot={slot} group={group_id} free_after={len(free_slots)}")
                     task = asyncio.create_task(
-                        self._generate_one(pending_groups[group_id].prompt, tool_dict=self._sync_tool_dicts[slot])
+                        self._generate_one(
+                            pending_groups[group_id].prompt,
+                            sync_tool_dict=self._sync_tool_dicts[slot],
+                            async_tool_dict=self._async_tool_dicts[slot],
+                        )
                     )
                     inflight_tasks[task] = (group_id, slot)
 
@@ -516,7 +522,7 @@ class AsyncRolloutWorker:
             group_id += 1
 
     async def _generate_one(
-        self, prompt: Messages, tool_dict: dict[str, Callable]
+        self, prompt: Messages, sync_tool_dict: dict[str, Callable], async_tool_dict: dict[str, Callable]
     ) -> tuple[list[dict[str, str]], list[int], list[float], list[int], int, int]:
         completion, completion_ids, completion_logprobs, tool_mask = [], [], [], []
         tool_call_count = 0
@@ -542,7 +548,9 @@ class AsyncRolloutWorker:
             if tool_calls is None or (max_iterations is not None and iteration_num >= max_iterations):
                 return completion, completion_ids, completion_logprobs, tool_mask, tool_call_count, tool_failure_count
 
-            tool_messages, n_calls, n_failures = self._execute_tool_calls(tool_calls, tool_dict)
+            tool_messages, n_calls, n_failures = await self._execute_tool_calls(
+                tool_calls, sync_tool_dict, async_tool_dict
+            )
             tool_call_count += n_calls
             tool_failure_count += n_failures
             completion.extend(tool_messages)
@@ -586,22 +594,49 @@ class AsyncRolloutWorker:
 
         return full_ids[len(prefix_ids) :]
 
-    def _execute_tool_calls(
-        self, tool_calls: list[dict[str, Any]], tool_dict: dict[str, Callable]
+    async def _execute_tool_calls(
+        self,
+        tool_calls: list[dict[str, Any]],
+        sync_tool_dict: dict[str, Callable],
+        async_tool_dict: dict[str, Callable],
     ) -> tuple[list[dict[str, str]], int, int]:
-        tool_messages = []
         n_calls = 0
         n_failures = 0
+        async_coros = []
+        tool_call_results = []
         for tool_call in tool_calls:
             n_calls += 1
-            function = tool_call["function"]
-            name = function["name"]
-            try:
-                arguments = function.get("arguments", {})
-                result = tool_dict[name](**arguments)
-            except Exception as error:
+            if tool_call.get("type") == "function":
+                function = tool_call["function"]
+                name = function["name"]
+                try:
+                    arguments = function.get("arguments", {})
+                    if name in sync_tool_dict:
+                        tool_call_results.append((name, sync_tool_dict[name](**arguments)))
+                    elif name in async_tool_dict:
+                        async_coros.append((name, async_tool_dict[name](**arguments)))
+                    else:
+                        raise ValueError(f"Tool {name} not found.")
+                except Exception as error:
+                    n_failures += 1
+                    tool_call_results.append((name, {"error": str(error)}))
+            else:
                 n_failures += 1
-                result = {"error": str(error)}
+                name = tool_call.get("name", "unknown")
+                tool_call_results.append((name, {"error": f"Unsupported tool call type: {tool_call['type']}"}))
+
+        if async_coros:
+            coros = [coro for _, coro in async_coros]
+            async_results = await asyncio.gather(*coros, return_exceptions=True)
+            for (name, _), result in zip(async_coros, async_results, strict=True):
+                if isinstance(result, Exception):
+                    n_failures += 1
+                    tool_call_results.append((name, {"error": str(result)}))
+                else:
+                    tool_call_results.append((name, result))
+
+        tool_messages = []
+        for name, result in tool_call_results:
             tool_messages.append({"role": "tool", "name": name, "content": str(result)})
         return tool_messages, n_calls, n_failures
 
