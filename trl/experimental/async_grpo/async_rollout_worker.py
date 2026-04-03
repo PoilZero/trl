@@ -603,8 +603,8 @@ class AsyncRolloutWorker:
         n_calls = 0
         n_failures = 0
         async_coros = []
-        tool_call_results = []
-        for tool_call in tool_calls:
+        tool_call_results: list[tuple[str, Any] | None] = [None] * len(tool_calls)
+        for idx, tool_call in enumerate(tool_calls):
             n_calls += 1
             if tool_call.get("type") == "function":
                 function = tool_call["function"]
@@ -612,31 +612,34 @@ class AsyncRolloutWorker:
                 try:
                     arguments = function.get("arguments", {})
                     if name in sync_tool_dict:
-                        tool_call_results.append((name, sync_tool_dict[name](**arguments)))
+                        tool_call_results[idx] = (name, sync_tool_dict[name](**arguments))
                     elif name in async_tool_dict:
-                        async_coros.append((name, async_tool_dict[name](**arguments)))
+                        async_coros.append((idx, name, async_tool_dict[name](**arguments)))
                     else:
                         raise ValueError(f"Tool {name} not found.")
                 except Exception as error:
                     n_failures += 1
-                    tool_call_results.append((name, {"error": str(error)}))
+                    tool_call_results[idx] = (name, {"error": str(error)})
             else:
                 n_failures += 1
                 name = tool_call.get("name", "unknown")
-                tool_call_results.append((name, {"error": f"Unsupported tool call type: {tool_call['type']}"}))
+                tool_call_results[idx] = (name, {"error": f"Unsupported tool call type: {tool_call['type']}"})
 
         if async_coros:
-            coros = [coro for _, coro in async_coros]
+            coros = [coro for _, _, coro in async_coros]
             async_results = await asyncio.gather(*coros, return_exceptions=True)
-            for (name, _), result in zip(async_coros, async_results, strict=True):
+            for (idx, name, _), result in zip(async_coros, async_results, strict=True):
                 if isinstance(result, Exception):
                     n_failures += 1
-                    tool_call_results.append((name, {"error": str(result)}))
+                    tool_call_results[idx] = (name, {"error": str(result)})
                 else:
-                    tool_call_results.append((name, result))
+                    tool_call_results[idx] = (name, result)
 
         tool_messages = []
-        for name, result in tool_call_results:
+        for tool_call_result in tool_call_results:
+            if tool_call_result is None:
+                raise ValueError("Unexpected missing tool call result.")
+            name, result = tool_call_result
             tool_messages.append({"role": "tool", "name": name, "content": str(result)})
         return tool_messages, n_calls, n_failures
 

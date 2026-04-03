@@ -53,9 +53,35 @@ def test_execute_tool_calls_supports_mixed_sync_and_async_tools():
 
     assert n_calls == 2
     assert n_failures == 0
-    assert {message["name"] for message in tool_messages} == {"sync_tool", "async_tool"}
-    assert any(message["content"] == "sync:1" for message in tool_messages)
-    assert any(message["content"] == "async:2" for message in tool_messages)
+    assert tool_messages == [
+        {"role": "tool", "name": "sync_tool", "content": "sync:1"},
+        {"role": "tool", "name": "async_tool", "content": "async:2"},
+    ]
+
+
+def test_execute_tool_calls_preserves_tool_call_order_for_mixed_sync_and_async_tools():
+    worker = _make_worker()
+    tool_calls = [
+        {"type": "function", "function": {"name": "sync_tool", "arguments": {"value": 1}}},
+        {"type": "function", "function": {"name": "async_tool", "arguments": {"value": 2}}},
+        {"type": "function", "function": {"name": "sync_tool", "arguments": {"value": 3}}},
+    ]
+
+    tool_messages, n_calls, n_failures = asyncio.run(
+        worker._execute_tool_calls(
+            tool_calls,
+            sync_tool_dict={"sync_tool": sync_tool},
+            async_tool_dict={"async_tool": async_tool},
+        )
+    )
+
+    assert n_calls == 3
+    assert n_failures == 0
+    assert tool_messages == [
+        {"role": "tool", "name": "sync_tool", "content": "sync:1"},
+        {"role": "tool", "name": "async_tool", "content": "async:2"},
+        {"role": "tool", "name": "sync_tool", "content": "sync:3"},
+    ]
 
 
 def test_execute_tool_calls_counts_async_failures():
