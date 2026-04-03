@@ -120,3 +120,39 @@ def test_execute_tool_calls_handles_unsupported_tool_call_type():
     assert len(tool_messages) == 1
     assert tool_messages[0]["name"] == "bad_tool"
     assert "Unsupported tool call type" in tool_messages[0]["content"]
+
+
+def test_execute_tool_calls_supports_flat_tool_call_structure_without_type():
+    worker = _make_worker()
+    tool_calls = [{"name": "sync_tool", "arguments": {"value": 5}}]
+
+    tool_messages, n_calls, n_failures = asyncio.run(
+        worker._execute_tool_calls(
+            tool_calls,
+            sync_tool_dict={"sync_tool": sync_tool},
+            async_tool_dict={},
+        )
+    )
+
+    assert n_calls == 1
+    assert n_failures == 0
+    assert tool_messages == [{"role": "tool", "name": "sync_tool", "content": "sync:5"}]
+
+
+def test_execute_tool_calls_missing_type_does_not_raise_keyerror():
+    worker = _make_worker()
+    tool_calls = [{"name": "unknown_tool", "arguments": {}}]
+
+    tool_messages, n_calls, n_failures = asyncio.run(
+        worker._execute_tool_calls(
+            tool_calls,
+            sync_tool_dict={},
+            async_tool_dict={},
+        )
+    )
+
+    assert n_calls == 1
+    assert n_failures == 1
+    assert len(tool_messages) == 1
+    assert tool_messages[0]["name"] == "unknown_tool"
+    assert "Tool unknown_tool not found." in tool_messages[0]["content"]
