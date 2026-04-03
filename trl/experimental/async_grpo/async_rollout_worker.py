@@ -606,12 +606,8 @@ class AsyncRolloutWorker:
         tool_call_results: list[tuple[str, Any] | None] = [None] * len(tool_calls)
         for idx, tool_call in enumerate(tool_calls):
             n_calls += 1
-            if "type" in tool_call and tool_call["type"] != "function":
-                n_failures += 1
-                name = tool_call.get("name", "unknown")
-                tool_call_results[idx] = (name, {"error": f"Unsupported tool call type: {tool_call['type']}"})
-            elif tool_call.get("type") == "function" or "function" in tool_call or "name" in tool_call:
-                function = tool_call.get("function", tool_call)
+            if tool_call["type"] == "function":
+                function = tool_call["function"]
                 name = function["name"]
                 try:
                     arguments = function.get("arguments", {})
@@ -627,8 +623,7 @@ class AsyncRolloutWorker:
             else:
                 n_failures += 1
                 name = tool_call.get("name", "unknown")
-                tool_call_type = tool_call.get("type", "missing")
-                tool_call_results[idx] = (name, {"error": f"Unsupported tool call type: {tool_call_type}"})
+                tool_call_results[idx] = (name, {"error": f"Unsupported tool call type: {tool_call['type']}"})
 
         if async_coros:
             coros = [coro for _, _, coro in async_coros]
